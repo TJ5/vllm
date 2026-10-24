@@ -393,14 +393,21 @@ Flags:
 * For Llama-based xLAM models: `--tool-call-parser xlam --chat-template examples/tool_chat_template_xlam_llama.jinja`
 * For Qwen-based xLAM models: `--tool-call-parser xlam --chat-template examples/tool_chat_template_xlam_qwen.jinja`
 
-### Qwen Models
+### Qwen JSON Models (`qwen3_json`)
 
-For Qwen2.5, the chat template in tokenizer_config.json has already included support for the Hermes-style tool use. Therefore, you can use the `hermes` parser to enable tool calls for Qwen models. For more detailed information, please refer to the official [Qwen documentation](https://qwen.readthedocs.io/en/latest/framework/function_call.html#vllm)
+Qwen2.5, QwQ and Qwen3 models use JSON tool calls enclosed in `<tool_call>` tags.
+Use `qwen3_json` with the model's included chat template. This parser treats the
+template's newline before and between calls as framing, and uses Qwen's native
+grammar for required and named tool choices, including parallel calls.
 
-* `Qwen/Qwen2.5-*`
+* `Qwen/Qwen2.5-*-Instruct`
 * `Qwen/QwQ-32B`
+* `Qwen/Qwen3-*` models using the JSON tool-call format
 
-Flags: `--tool-call-parser hermes`
+Flags: `--enable-auto-tool-choice --tool-call-parser qwen3_json`
+
+For Qwen3 reasoning models, also use `--reasoning-parser qwen3`.
+Qwen3-Coder models use the separate [`qwen3_xml` parser](#qwen3-coder-models-qwen3_xml).
 
 ### DeepSeek-V3 Models (`deepseek_v3`)
 

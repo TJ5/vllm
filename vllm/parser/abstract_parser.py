@@ -993,7 +993,7 @@ class DelegatingParser(Parser):
 
         if finished:
             delta_message = self.finalize_generation(delta_message, request, state)
-            delta_message = self._flush_engine_parsers(delta_message)
+            delta_message = self._flush_parsers(delta_message)
 
         # Suppress reasoning deltas if not requested
         if delta_message and not request.include_reasoning:
@@ -1012,14 +1012,10 @@ class DelegatingParser(Parser):
             return 0
         return self._reasoning_parser.count_reasoning_tokens(token_ids)
 
-    def _flush_engine_parsers(
-        self, delta_message: DeltaMessage | None
-    ) -> DeltaMessage | None:
-        """Flush buffered state from engine-based parsers at stream end."""
+    def _flush_parsers(self, delta_message: DeltaMessage | None) -> DeltaMessage | None:
+        """Flush any parser with buffered state at stream end."""
         reasoning_ended = self._stream_state.reasoning_ended
         for parser in (self._reasoning_parser, self._tool_parser):
-            if not getattr(parser, "engine_based_streaming", False):
-                continue
             # When reasoning has ended and we transitioned to the tool
             # phase, the reasoning parser's engine may still have buffered
             # characters from tool-call markup it saw with

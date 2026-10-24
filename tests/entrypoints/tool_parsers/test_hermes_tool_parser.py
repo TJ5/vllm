@@ -318,3 +318,96 @@ async def test_streaming_product_tool_call(
     print("\n[Streaming Product Test Passed]")
     print(f"Reconstructed Tool Call: {reconstructed_tool_call['name']}")
     print(f"Reconstructed Arguments: {arguments}")
+
+
+@pytest.fixture(scope="module")
+def qwen_json_server():
+    args = [
+        "--enforce-eager",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "qwen3_json",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "2",
+        "--gpu-memory-utilization",
+        "0.1",
+    ]
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args) as server:
+        yield server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("choice", "parallel"),
+    [("auto", True), ("required", True), ("required", False), ("named", True)],
+)
+async def test_qwen_json_parallel_tool_calls(
+    qwen_json_server, stream, choice, parallel
+):
+    """Native Qwen framing must allow both cities under required tool choice."""
+    tool_choice = (
+        {"type": "function", "function": {"name": "get_current_weather"}}
+        if choice == "named"
+        else choice
+    )
+    async with qwen_json_server.get_async_client() as client:
+        response = await client.chat.completions.create(
+            model="Qwen/Qwen3-0.6B",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Get the current weather for both Paris and Tokyo. "
+                    "Call the weather tool once for each city. "
+                    "Do not write any other text.",
+                }
+            ],
+            tools=TOOLS,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel,
+            temperature=0,
+            max_tokens=256,
+            stream=stream,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        if stream:
+            calls: dict[int, tuple[str, str]] = {}
+            content = ""
+            finish_reason = None
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+                item = chunk.choices[0]
+                content += item.delta.content or ""
+                finish_reason = item.finish_reason or finish_reason
+                for call in item.delta.tool_calls or []:
+                    name, arguments = calls.get(call.index, ("", ""))
+                    if call.function:
+                        name += call.function.name or ""
+                        arguments += call.function.arguments or ""
+                    calls[call.index] = (name, arguments)
+            parsed_calls = list(calls.values())
+        else:
+            item = response.choices[0]
+            content = item.message.content or ""
+            finish_reason = item.finish_reason
+            parsed_calls = [
+                (call.function.name, call.function.arguments)
+                for call in item.message.tool_calls or []
+            ]
+
+    assert finish_reason == "tool_calls"
+    assert content == ""
+    expected_count = 2 if parallel and choice != "named" else 1
+    assert len(parsed_calls) == expected_count
+    locations = []
+    for name, arguments in parsed_calls:
+        assert name == "get_current_weather"
+        location = json.loads(arguments)["location"]
+        assert "Paris" in location or "Tokyo" in location
+        locations.append(location)
+    if expected_count == 2:
+        assert any("Paris" in location for location in locations)
+        assert any("Tokyo" in location for location in locations)

@@ -420,3 +420,138 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+@pytest.fixture
+def qwen_json_parser(qwen_tokenizer):
+    from vllm.parser.parser_manager import ParserManager
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_json", enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    return parser_cls(qwen_tokenizer)
+
+
+@pytest.mark.parametrize("prefix", ["", "Let me check.", "Let me check.\n"])
+@pytest.mark.parametrize("chunk_size", [1, 1000])
+def test_qwen_json_tool_framing(qwen_json_parser, prefix, chunk_size):
+    """Only the template's newline before/between calls is framing."""
+    from tests.tool_parsers.utils import StreamingToolReconstructor
+
+    request = ChatCompletionRequest(
+        model="Qwen/Qwen3-32B",
+        messages=[],
+        tool_choice="auto",
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    calls = [
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+        "\n</tool_call>",
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}'
+        "\n</tool_call>",
+    ]
+    output = prefix + "\n" + "\n".join(calls)
+    _, content, tool_calls = qwen_json_parser.parse(
+        output, request, enable_auto_tools=True
+    )
+    assert content == (prefix or None)
+    assert [json.loads(tc.arguments) for tc in tool_calls] == [
+        {"city": "Paris"},
+        {"city": "Tokyo"},
+    ]
+
+    reconstructed = StreamingToolReconstructor(assert_one_tool_per_delta=False)
+    for start in range(0, len(output), chunk_size):
+        delta = qwen_json_parser.parse_delta(
+            output[start : start + chunk_size],
+            [],
+            request,
+            prompt_token_ids=[],
+            finished=start + chunk_size >= len(output),
+        )
+        if delta:
+            reconstructed.append_delta(delta)
+    assert reconstructed.other_content == prefix
+    assert [
+        (tc.function.name, tc.function.arguments) for tc in reconstructed.tool_calls
+    ] == [(tc.name, tc.arguments) for tc in tool_calls]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hello\n",
+        "Hello\n\n",
+        "Hello\n<tool_",
+        "Hello\nworld",
+        '<tool_call>\n{"name": "get_weather", "arguments": {}}\n</tool_call>',
+    ],
+)
+def test_qwen_json_preserves_ordinary_content(qwen_json_parser, text):
+    """A held newline or partial marker must be returned at stream end."""
+    request = ChatCompletionRequest(
+        model="Qwen/Qwen3-32B",
+        messages=[],
+        tool_choice="none" if text.startswith("<tool_call>") else "auto",
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    _, content, tool_calls = qwen_json_parser.parse(
+        text, request, enable_auto_tools=True
+    )
+    assert content == text
+    assert not tool_calls
+    chunks = []
+    for i, char in enumerate(text):
+        delta = qwen_json_parser.parse_delta(
+            char, [], request, prompt_token_ids=[], finished=i == len(text) - 1
+        )
+        if delta:
+            assert not delta.tool_calls
+            chunks.append(delta.content or "")
+    assert "".join(chunks) == text
+
+
+@pytest.mark.parametrize("tool_choice", ["required", "named"])
+@pytest.mark.parametrize("parallel", [True, False])
+def test_qwen_json_constrains_native_parallel_calls(
+    qwen_json_parser, tool_choice, parallel
+):
+    """The request grammar accepts Qwen framing and honors single-call limits."""
+    from xgrammar import Grammar
+    from xgrammar.testing import _is_grammar_accept_string
+
+    choice = (
+        {"type": "function", "function": {"name": "get_weather"}}
+        if tool_choice == "named"
+        else tool_choice
+    )
+    request = ChatCompletionRequest(
+        model="Qwen/Qwen3-32B",
+        messages=[],
+        tool_choice=choice,
+        parallel_tool_calls=parallel,
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    )
+    request = qwen_json_parser.adjust_request(request)
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    call = (
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+        "\n</tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, call)
+    assert _is_grammar_accept_string(grammar, call + "\n" + call) == (
+        parallel and tool_choice == "required"
+    )
