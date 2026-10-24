@@ -398,7 +398,7 @@ async def test_qwen_json_parallel_tool_calls(
                 for call in item.message.tool_calls or []
             ]
 
-    assert finish_reason == "tool_calls"
+    assert finish_reason == ("stop" if choice == "named" else "tool_calls")
     assert content == ""
     expected_count = 2 if parallel and choice != "named" else 1
     assert len(parsed_calls) == expected_count
